@@ -7,12 +7,12 @@
     Removes contents from user and system temp folders, legacy IE cache,
     Windows Update download cache, prefetch data, and minidump files.
     Requires elevation for system-level paths (Windows\Temp, Prefetch, etc.).
-    Displays a summary of total disk space freed after execution.
+    Displays a structured report of disk space freed after execution.
 .PARAMETER SkipRecycleBin
     If specified, the Recycle Bin will NOT be cleared.
 .PARAMETER LogFile
-    Optional path to a log file. When specified, all output is also appended
-    to this file with timestamps.
+    Optional path to a log file. All output is appended with timestamps.
+    The parent directory must already exist.
 .EXAMPLE
     .\DailyClear.ps1
     Clears all temp folders and the Recycle Bin.
@@ -22,154 +22,239 @@
 .EXAMPLE
     .\DailyClear.ps1 -LogFile "$env:USERPROFILE\DailyClear.log"
     Clears everything and logs results to a file.
+.EXAMPLE
+    .\DailyClear.ps1 -WhatIf -Verbose
+    Preview mode — shows what would be deleted without removing anything.
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
     [switch]$SkipRecycleBin,
+
+    [ValidateScript({
+            $parent = Split-Path $_ -Parent
+            if ($parent -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
+                throw "Log directory does not exist: $parent"
+            }
+            $true
+        })]
     [string]$LogFile
 )
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Utilities
+# ═══════════════════════════════════════════════════════════════════════════════
 
-function Write-Log {
-    param([string]$Message, [string]$Level = 'INFO')
-    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $entry = "[$timestamp] [$Level] $Message"
-
-    switch ($Level) {
-        'WARN' { Write-Warning $Message }
-        'VERB' { Write-Verbose $Message }
-        default { Write-Output  $Message }
-    }
-
-    if ($LogFile) {
-        $entry | Out-File -FilePath $LogFile -Append -Encoding utf8
-    }
-}
-
-# ── Elevation check ─────────────────────────────────────────────────────────
-
-$IsElevated = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-    [Security.Principal.WindowsBuiltinRole]::Administrator)
-
-if (-not $IsElevated) {
-    Write-Log 'Not elevated: some locations (e.g. Windows\Temp, Prefetch) may be skipped.' -Level VERB
-}
-
-# ── Core function ────────────────────────────────────────────────────────────
-
-$script:TotalFreed = 0
-
-function Clear-Folder {
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [switch]$RequireAdmin
-    )
-
-    if ($RequireAdmin -and -not $IsElevated) {
-        Write-Log "Skipping '$Path' (requires administrative privileges)." -Level WARN
-        return
-    }
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        Write-Log "Path not found: $Path" -Level VERB
-        return
-    }
-
-    # Measure size before deletion
-    $sizeBefore = (Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue |
-        Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
-    if (-not $sizeBefore) { $sizeBefore = 0 }
-
-    if ($PSCmdlet.ShouldProcess($Path, 'Remove contents')) {
-        $deletedCount = 0
-        $failedCount = 0
-
-        Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction SilentlyContinue |
-        ForEach-Object {
-            $item = $_
-            try {
-                Remove-Item -LiteralPath $item.FullName -Force -Recurse -ErrorAction Stop
-                $deletedCount++
-                Write-Log "Deleted: $($item.FullName)" -Level VERB
-            }
-            catch {
-                $err = $_
-                $failedCount++
-                Write-Log "Cannot delete: $($item.FullName) - $($err.Exception.Message)" -Level WARN
-            }
-        }
-
-        # Measure size after deletion
-        $sizeAfter = (Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue |
-            Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
-        if (-not $sizeAfter) { $sizeAfter = 0 }
-
-        $freed = $sizeBefore - $sizeAfter
-        if ($freed -lt 0) { $freed = 0 }
-        $script:TotalFreed += $freed
-
-        $freedStr = Format-Size $freed
-        Write-Log "Cleared: $Path ($deletedCount removed, $failedCount failed, $freedStr freed)"
-    }
-}
-
-function Format-Size {
-    param([long]$Bytes)
+function Format-Size ([long]$Bytes) {
     if ($Bytes -ge 1GB) { return '{0:N2} GB' -f ($Bytes / 1GB) }
     if ($Bytes -ge 1MB) { return '{0:N2} MB' -f ($Bytes / 1MB) }
     if ($Bytes -ge 1KB) { return '{0:N2} KB' -f ($Bytes / 1KB) }
     return "$Bytes B"
 }
 
-# ── Target locations ─────────────────────────────────────────────────────────
+function Write-Log {
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet('INFO', 'WARN', 'VERB')][string]$Level = 'INFO'
+    )
 
-$locations = @(
-    # User temp
-    @{ Path = $env:TEMP; RequireAdmin = $false }
-    @{ Path = Join-Path $env:LOCALAPPDATA 'Temp'; RequireAdmin = $false }
-
-    # Legacy IE cache (mostly empty on modern Windows, kept for compat)
-    @{ Path          = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Temporary Internet Files\Content.IE5'
-        RequireAdmin = $false 
+    switch ($Level) {
+        'WARN' { Write-Warning $Message }
+        'VERB' { Write-Verbose $Message }
+        default { Write-Information $Message -InformationAction Continue }
     }
 
-    # System locations (require elevation)
-    @{ Path = Join-Path $env:SystemRoot 'Temp'; RequireAdmin = $true }
-    @{ Path = Join-Path $env:SystemRoot 'Prefetch'; RequireAdmin = $true }
-    @{ Path = Join-Path $env:SystemRoot 'Minidump'; RequireAdmin = $true }
-    @{ Path = Join-Path $env:SystemRoot 'SoftwareDistribution\Download'; RequireAdmin = $true }
-)
+    if ($LogFile) {
+        $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        "[$stamp] [$Level] $Message" | Out-File -FilePath $LogFile -Append -Encoding utf8
+    }
+}
 
-# ── Recycle Bin ──────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Core Logic
+# ═══════════════════════════════════════════════════════════════════════════════
 
-if (-not $SkipRecycleBin) {
-    if (Get-Command -Name Clear-RecycleBin -ErrorAction SilentlyContinue) {
-        if ($PSCmdlet.ShouldProcess('Recycle Bin', 'Clear')) {
-            try {
-                Clear-RecycleBin -Force -ErrorAction SilentlyContinue
-                Write-Log 'Recycle Bin cleared.'
-            }
-            catch {
-                $err = $_
-                Write-Log "Failed to clear Recycle Bin: $($err.Exception.Message)" -Level WARN
-            }
+function Clear-Folder {
+    <#
+    .SYNOPSIS
+        Removes the contents of a single folder and returns a result object.
+    .DESCRIPTION
+        Deletes only the direct children of the target path (each with -Recurse),
+        avoiding double-deletion of nested items. Returns a typed PSCustomObject
+        with deletion statistics.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Label,
+        [switch]$RequireAdmin
+    )
+
+    # Build a default result
+    $result = [PSCustomObject]@{
+        Label      = if ($Label) { $Label } else { $Path }
+        Path       = $Path
+        Deleted    = [int]0
+        Failed     = [int]0
+        BytesFreed = [long]0
+        Skipped    = [bool]$false
+        SkipReason = [string]''
+    }
+
+    # Guard: elevation
+    if ($RequireAdmin -and -not $script:IsElevated) {
+        $result.Skipped = $true
+        $result.SkipReason = 'Requires elevation'
+        Write-Log "Skipping '$($result.Label)' (requires administrative privileges)." -Level WARN
+        return $result
+    }
+
+    # Guard: path existence
+    if (-not (Test-Path -LiteralPath $Path)) {
+        $result.Skipped = $true
+        $result.SkipReason = 'Path not found'
+        Write-Log "Path not found: $Path" -Level VERB
+        return $result
+    }
+
+    # Measure total size before deletion (single scan)
+    $sizeBefore = (Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue |
+        Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
+    if (-not $sizeBefore) { $sizeBefore = 0 }
+
+    if (-not $PSCmdlet.ShouldProcess($Path, 'Remove contents')) {
+        return $result
+    }
+
+    # Delete direct children only — each Remove-Item -Recurse handles its own subtree
+    Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        $item = $_
+        try {
+            Remove-Item -LiteralPath $item.FullName -Force -Recurse -ErrorAction Stop
+            $result.Deleted++
+            Write-Log "Deleted: $($item.FullName)" -Level VERB
+        }
+        catch {
+            $err = $_
+            $result.Failed++
+            Write-Log "Cannot delete: $($item.FullName) - $($err.Exception.Message)" -Level WARN
         }
     }
-    else {
+
+    # Measure remaining size
+    $sizeAfter = (Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue |
+        Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
+    if (-not $sizeAfter) { $sizeAfter = 0 }
+
+    $result.BytesFreed = [Math]::Max(0, $sizeBefore - $sizeAfter)
+
+    $freedStr = Format-Size $result.BytesFreed
+    Write-Log ('Cleared: {0} ({1} removed, {2} failed, {3} freed)' -f $result.Label, $result.Deleted, $result.Failed, $freedStr)
+    return $result
+}
+
+function Clear-RecycleBinSafe {
+    <#
+    .SYNOPSIS
+        Clears the Recycle Bin and returns a result object.
+    #>
+    $result = [PSCustomObject]@{
+        Label      = 'Recycle Bin'
+        Path       = 'N/A'
+        Deleted    = [int]0
+        Failed     = [int]0
+        BytesFreed = [long]0
+        Skipped    = [bool]$false
+        SkipReason = [string]''
+    }
+
+    if (-not (Get-Command -Name Clear-RecycleBin -ErrorAction SilentlyContinue)) {
+        $result.Skipped = $true
+        $result.SkipReason = 'Cmdlet not available'
         Write-Log 'Clear-RecycleBin cmdlet not available.' -Level VERB
+        return $result
+    }
+
+    if (-not $PSCmdlet.ShouldProcess('Recycle Bin', 'Clear')) {
+        return $result
+    }
+
+    try {
+        Clear-RecycleBin -Force -ErrorAction Stop
+        $result.Deleted = 1
+        Write-Log 'Recycle Bin cleared.'
+    }
+    catch {
+        $err = $_
+        $result.Failed = 1
+        Write-Log ('Failed to clear Recycle Bin: {0}' -f $err.Exception.Message) -Level WARN
+    }
+
+    return $result
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Configuration (declarative)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+$script:IsElevated = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltinRole]::Administrator)
+
+if (-not $script:IsElevated) {
+    Write-Log 'Not elevated: some locations will be skipped.' -Level VERB
+}
+
+$Locations = @(
+    [PSCustomObject]@{ Label = 'User Temp'; Path = $env:TEMP; RequireAdmin = $false }
+    [PSCustomObject]@{ Label = 'LocalAppData Temp'; Path = Join-Path $env:LOCALAPPDATA 'Temp'; RequireAdmin = $false }
+    [PSCustomObject]@{ Label = 'IE Cache (legacy)'; Path = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Temporary Internet Files\Content.IE5'; RequireAdmin = $false }
+    [PSCustomObject]@{ Label = 'Windows Temp'; Path = Join-Path $env:SystemRoot 'Temp'; RequireAdmin = $true }
+    [PSCustomObject]@{ Label = 'Prefetch'; Path = Join-Path $env:SystemRoot 'Prefetch'; RequireAdmin = $true }
+    [PSCustomObject]@{ Label = 'Minidump'; Path = Join-Path $env:SystemRoot 'Minidump'; RequireAdmin = $true }
+    [PSCustomObject]@{ Label = 'WU Download Cache'; Path = Join-Path $env:SystemRoot 'SoftwareDistribution\Download'; RequireAdmin = $true }
+)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Orchestration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+$stopwatch = [Diagnostics.Stopwatch]::StartNew()
+$results = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+# 1. Clear folders
+foreach ($loc in $Locations) {
+    $r = Clear-Folder -Path $loc.Path -Label $loc.Label -RequireAdmin:$loc.RequireAdmin
+    $results.Add($r)
+}
+
+# 2. Clear Recycle Bin (after folders)
+if (-not $SkipRecycleBin) {
+    $r = Clear-RecycleBinSafe
+    $results.Add($r)
+}
+
+$stopwatch.Stop()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Report
+# ═══════════════════════════════════════════════════════════════════════════════
+
+$reportData = $results | ForEach-Object {
+    $status = if ($_.Skipped) { "SKIP ($($_.SkipReason))" }
+    elseif ($_.Failed -gt 0 -and $_.Deleted -gt 0) { 'PARTIAL' }
+    elseif ($_.Failed -gt 0) { 'FAILED' }
+    else { 'OK' }
+    [PSCustomObject]@{
+        Location = $_.Label
+        Status   = $status
+        Deleted  = $_.Deleted
+        Failed   = $_.Failed
+        Freed    = Format-Size $_.BytesFreed
     }
 }
 
-# ── Execute clears ──────────────────────────────────────────────────────────
+Write-Information '' -InformationAction Continue
+$reportData | Format-Table -AutoSize | Out-String | ForEach-Object { Write-Information $_.TrimEnd() -InformationAction Continue }
 
-foreach ($loc in $locations) {
-    $params = @{ Path = $loc.Path }
-    if ($loc.RequireAdmin) { $params['RequireAdmin'] = $true }
-    Clear-Folder @params
-}
-
-# ── Summary ──────────────────────────────────────────────────────────────────
-
-$totalStr = Format-Size $script:TotalFreed
-Write-Log "Done. Total space freed: $totalStr."
+$totalFreed = ($results | Measure-Object -Property BytesFreed -Sum).Sum
+$elapsedSecs = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 1)
+$totalFreedStr = Format-Size $totalFreed
+Write-Log "Done - $totalFreedStr freed in ${elapsedSecs}s."
