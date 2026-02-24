@@ -41,6 +41,34 @@ param(
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Self-elevation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+$script:IsElevated = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltinRole]::Administrator)
+
+if (-not $script:IsElevated) {
+    # Re-launch the script elevated, forwarding all bound parameters
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $MyInvocation.MyCommand.Definition)
+    if ($SkipRecycleBin) { $argList += '-SkipRecycleBin' }
+    if ($LogFile) { $argList += '-LogFile'; $argList += $LogFile }
+    if ($WhatIfPreference) { $argList += '-WhatIf' }
+    if ($VerbosePreference -eq 'Continue') { $argList += '-Verbose' }
+
+    $elevated = $false
+    try {
+        Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $argList
+        $elevated = $true
+    }
+    catch {
+        Write-Warning 'Elevation cancelled or failed. Running without admin privileges.'
+    }
+
+    if ($elevated) { exit }
+    # Otherwise, continue running non-elevated
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Utilities
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -187,8 +215,15 @@ function Clear-RecycleBinSafe {
     }
     catch {
         $err = $_
-        $result.Failed = 1
-        Write-Log ('Failed to clear Recycle Bin: {0}' -f $err.Exception.Message) -Level VERB
+        $msg = $err.Exception.Message
+        # Empty recycle bin is not an error
+        if ($msg -match 'empty|vide|0x800700002|Element not found') {
+            Write-Log 'Recycle Bin is already empty.' -Level VERB
+        }
+        else {
+            $result.Failed = 1
+            Write-Log ('Failed to clear Recycle Bin: {0}' -f $msg) -Level VERB
+        }
     }
 
     return $result
@@ -198,12 +233,6 @@ function Clear-RecycleBinSafe {
 #  Configuration (declarative)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-$script:IsElevated = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-    [Security.Principal.WindowsBuiltinRole]::Administrator)
-
-if (-not $script:IsElevated) {
-    Write-Log 'Not elevated: some locations will be skipped.' -Level VERB
-}
 
 # Deduplicate: $env:TEMP and $env:LOCALAPPDATA\Temp often resolve to the same path
 $userTemp = $env:TEMP
