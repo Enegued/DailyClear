@@ -270,3 +270,6 @@ $totalFreed = ($results | Measure-Object -Property BytesFreed -Sum).Sum
 $elapsedSecs = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 1)
 $totalFreedStr = Format-Size $totalFreed
 Write-Log "Done - $totalFreedStr freed in ${elapsedSecs}s."
+
+Write-Information '' -InformationAction Continue
+Read-Host 'Press Enter to close'
