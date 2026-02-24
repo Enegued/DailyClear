@@ -24,7 +24,7 @@
     Clears everything and logs results to a file.
 .EXAMPLE
     .\DailyClear.ps1 -WhatIf -Verbose
-    Preview mode — shows what would be deleted without removing anything.
+    Preview mode - shows what would be deleted without removing anything.
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
@@ -82,6 +82,7 @@ function Clear-Folder {
         avoiding double-deletion of nested items. Returns a typed PSCustomObject
         with deletion statistics.
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][string]$Path,
         [string]$Label,
@@ -124,7 +125,7 @@ function Clear-Folder {
         return $result
     }
 
-    # Delete direct children only — each Remove-Item -Recurse handles its own subtree
+    # Delete direct children only - each Remove-Item -Recurse handles its own subtree
     Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | ForEach-Object {
         $item = $_
         try {
@@ -156,6 +157,8 @@ function Clear-RecycleBinSafe {
     .SYNOPSIS
         Clears the Recycle Bin and returns a result object.
     #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
     $result = [PSCustomObject]@{
         Label      = 'Recycle Bin'
         Path       = 'N/A'
@@ -202,15 +205,24 @@ if (-not $script:IsElevated) {
     Write-Log 'Not elevated: some locations will be skipped.' -Level VERB
 }
 
+# Deduplicate: $env:TEMP and $env:LOCALAPPDATA\Temp often resolve to the same path
+$userTemp = $env:TEMP
+$localAppTemp = Join-Path $env:LOCALAPPDATA 'Temp'
+$tempIsDuplicate = ($userTemp -eq $localAppTemp)
+
 $Locations = @(
-    [PSCustomObject]@{ Label = 'User Temp'; Path = $env:TEMP; RequireAdmin = $false }
-    [PSCustomObject]@{ Label = 'LocalAppData Temp'; Path = Join-Path $env:LOCALAPPDATA 'Temp'; RequireAdmin = $false }
+    [PSCustomObject]@{ Label = 'User Temp'; Path = $userTemp; RequireAdmin = $false }
     [PSCustomObject]@{ Label = 'IE Cache (legacy)'; Path = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Temporary Internet Files\Content.IE5'; RequireAdmin = $false }
     [PSCustomObject]@{ Label = 'Windows Temp'; Path = Join-Path $env:SystemRoot 'Temp'; RequireAdmin = $true }
     [PSCustomObject]@{ Label = 'Prefetch'; Path = Join-Path $env:SystemRoot 'Prefetch'; RequireAdmin = $true }
     [PSCustomObject]@{ Label = 'Minidump'; Path = Join-Path $env:SystemRoot 'Minidump'; RequireAdmin = $true }
     [PSCustomObject]@{ Label = 'WU Download Cache'; Path = Join-Path $env:SystemRoot 'SoftwareDistribution\Download'; RequireAdmin = $true }
 )
+
+# Only add LocalAppData\Temp if it differs from $env:TEMP
+if (-not $tempIsDuplicate) {
+    $Locations += [PSCustomObject]@{ Label = 'LocalAppData Temp'; Path = $localAppTemp; RequireAdmin = $false }
+}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Orchestration
