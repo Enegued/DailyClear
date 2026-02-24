@@ -104,7 +104,7 @@ function Clear-Folder {
     if ($RequireAdmin -and -not $script:IsElevated) {
         $result.Skipped = $true
         $result.SkipReason = 'Requires elevation'
-        Write-Log "Skipping '$($result.Label)' (requires administrative privileges)." -Level WARN
+        Write-Log "Skipping '$($result.Label)' (requires administrative privileges)." -Level VERB
         return $result
     }
 
@@ -136,7 +136,7 @@ function Clear-Folder {
         catch {
             $err = $_
             $result.Failed++
-            Write-Log "Cannot delete: $($item.FullName) - $($err.Exception.Message)" -Level WARN
+            Write-Log "Cannot delete: $($item.FullName) - $($err.Exception.Message)" -Level VERB
         }
     }
 
@@ -188,7 +188,7 @@ function Clear-RecycleBinSafe {
     catch {
         $err = $_
         $result.Failed = 1
-        Write-Log ('Failed to clear Recycle Bin: {0}' -f $err.Exception.Message) -Level WARN
+        Write-Log ('Failed to clear Recycle Bin: {0}' -f $err.Exception.Message) -Level VERB
     }
 
     return $result
